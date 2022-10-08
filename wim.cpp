@@ -167,10 +167,16 @@ int wim_snprintf(char* target_buffer, int length_of_buffer, const char* format_s
                 switch (format_string[i]) {
                     case 'd': {
                         auto d = va_arg(args, int);
+                        int sign = 1;
+                        if (d < 0) {
+                            sign = -1;
+                            d *= -1;
+                        }
                         int digit_count = 0;
-                        {auto _d = d; while (_d) digit_count++, _d /= 10;}
+                        {auto _d = d; do {digit_count++,  _d /= 10;} while (_d);}
 
                         /* 0 is the end, digit_count-1 is the front */
+                        if (sign < 1) target_buffer[write_cursor++] = '-';
                         for (int digit_index = 0; digit_index < digit_count; ++digit_index) {
                             int digit = 0;
                             {
@@ -386,7 +392,7 @@ const char* wim_mode_strings[] = {
 };
 struct WIM_Buffer {
     /* This is a naive line buffer for now, but this API can be swapped pretty simply...*/
-    int  line_count;
+    int  line_count=1;
     Line lines[MAX_LINES];
 };
 
@@ -427,17 +433,23 @@ local void reset_buffer(void) {
 }
 /* this is making an absolutely new line */
 local Line* new_line(int at=-1) {
-    if (at == -1) {
+    /*
+      Honestly, I have a pretty trashy "insert" implementation since I have
+      to account for the fact I have a moving cursor.
+
+      This works though.
+     */
+    if (at == -1 || at == global_wim->line_count-1) {
+        /* push_back new */
         at = global_wim->line_count;
         global_wim->line_count++;
-        for (int i = at; i < global_wim->line_count; ++i) {
-            global_wim->lines[i+1] = global_wim->lines[i];
-        }
     } else {
         global_wim->line_count++;
         /* copy and push forward lines, new line */
-        for (int i = global_wim->line_count-1; i >= at; --i) {
-            global_wim->lines[i] = global_wim->lines[i-1];
+        if (at > 0) {
+            for (int i = global_wim->line_count-1; i >= at; --i) {
+                global_wim->lines[i] = global_wim->lines[i-1];
+            }
         }
     }
     global_wim->lines[at].used   = 0;
@@ -491,11 +503,13 @@ local void draw_buffer(void) {
     s32 y = 0;
     for (s32 line_index = line_draw_start; line_index < line_draw_end+1; ++line_index) {
         Line* current_line = global_wim->lines + line_index;
-        char linenum[16];
-        int wrote = wim_snprintf(linenum, 16, "%d", line_index+1);
-        linenum[wrote] = 0;
-        wim_set_attribs(WIM_VIDEO_ATTRIBUTE_FG_RED);
-        wim_write_string_at(0, y, linenum);
+        if (global_wim->linenum && (line_index) < global_wim->line_count) {
+            char linenum[16];
+            int wrote = wim_snprintf(linenum, 16, "%d", line_index+1);
+            linenum[wrote] = 0;
+            wim_set_attribs(WIM_VIDEO_ATTRIBUTE_FG_RED);
+            wim_write_string_at(0, y, linenum);
+        }
         wim_set_attribs(WIM_DEFAULT_FLAGS);
         wim_write_string_at(pad, y, current_line->str);
         for (s32 i = 0; i < w - current_line->used; ++i) wim_write_char_at(pad+current_line->used+i, y, ' ');
@@ -517,6 +531,7 @@ local void draw_status_mode_line(int height) {
 
     auto modeline_text = (char*)scratch_arena.allocate(w);
     int written = wim_snprintf(modeline_text, w, "WIM, MODE: %s,   ", wim_mode_strings[global_wim->mode]);
+    written+=wim_snprintf(modeline_text+written, w - written, "CURSOR<%d,%d>, LINES: (%d) ", global_wim->cursor_x, global_wim->cursor_y, global_wim->line_count);
     if (in_chord_mode()) {
         for (int i = 0; i < global_wim->chord_write_cursor; ++i) {
             char* to_write_fmt = "%c, ";
@@ -548,6 +563,7 @@ local void draw_status_mode_line(int height) {
 }
 
 local bool load_buffer(const char* buffer, size_t buffer_length) {
+    reset_buffer();
     Line* current_line = new_line();
 
     for (unsigned index = 0; index < buffer_length; ++index) {
@@ -719,13 +735,13 @@ local void delete_character_at(int at_x, int at_y) {
     auto& current_line = global_wim->lines[global_wim->cursor_y];
 
     if (current_line.used != 0) {
-        for (int i = global_wim->cursor_x; i < current_line.used; ++i) {
-            current_line.str[i-1] = current_line.str[i];
+        if (global_wim->cursor_x != 0) {
+            for (int i = global_wim->cursor_x; i < current_line.used; ++i) {
+                current_line.str[i-1] = current_line.str[i];
+            }
         }
         current_line.used--;
     }
-
-    keep_cursor_in_column_bounds();
 };
 
 local char character_at(int at_x, int at_y) {
@@ -853,11 +869,13 @@ local void wim_process_insert_mode(char ascii_input, int key_input) {
             }
         } else if (global_wim->cursor_x == 0) {
             /* NOTE, the correct behavior is to merge the remenants of the line! */
-            delete_line(global_wim->cursor_y);
-            move_up();
-            goto_end_of_line();
-            move_right();
-            keep_cursor_in_column_bounds();
+            if (global_wim->line_count > 1) {
+                delete_line(global_wim->cursor_y);
+                move_up();
+                goto_end_of_line();
+                move_right();
+                keep_cursor_in_column_bounds();
+            }
         }
     } else if (key_input == VK_TAB) {
         for (int i = 0; i < 4; ++i) insert_character(global_wim->cursor_x, global_wim->cursor_y, ' ');
@@ -871,9 +889,15 @@ local void wim_process_insert_mode(char ascii_input, int key_input) {
         move_left();
     } else if (key_input == VK_RETURN) {
         /* NOTE, the correct behavior is to split the remenants of the line! */
-        move_down();
-        new_line(global_wim->cursor_y);
-        goto_start_of_line();
+        if (global_wim->line_count <= 2) {
+            new_line(global_wim->cursor_y);
+            move_down();
+            goto_start_of_line();
+        } else {
+            move_down();
+            new_line(global_wim->cursor_y);
+            goto_start_of_line();
+        }
     } else {
         if (ascii_input) {
             insert_character(global_wim->cursor_x, global_wim->cursor_y, ascii_input);
@@ -972,6 +996,7 @@ extern "C" int WINAPI mainCRTStartup(void) {
     scratch_arena = vmem_arena_create(Gigabyte(1));
 
     global_wim    = (wim_state*)main_arena.allocate(sizeof(*global_wim));
+    load_buffer(0, 0);
 
     char** argument_values = (char**)scratch_arena.allocate(1024 * sizeof(char**));
     int    argument_count  = 0;
