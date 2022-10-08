@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-
+asidoasioodiasoiasd
 char* line = "repeat this line a lot!";
 
 int main(void) {
@@ -75,3 +75,4 @@ int main(void) {
 
     fclose(out);
 }
+

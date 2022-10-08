@@ -410,6 +410,7 @@ struct wim_state {
     int  command_cursor_current = 0;
     int  command_length = 0;
     char command_line[LINE_MAX_CHAR] = {};
+    char buffername[260]             = {};
 
     int chord_write_cursor = 0;
     char chord_state[64];
@@ -531,7 +532,7 @@ local void draw_status_mode_line(int height) {
 
     auto modeline_text = (char*)scratch_arena.allocate(w);
     int written = wim_snprintf(modeline_text, w, "WIM, MODE: %s,   ", wim_mode_strings[global_wim->mode]);
-    written+=wim_snprintf(modeline_text+written, w - written, "CURSOR<%d,%d>, LINES: (%d) ", global_wim->cursor_x, global_wim->cursor_y, global_wim->line_count);
+    written+=wim_snprintf(modeline_text+written, w - written, "[%s] CURSOR<%d,%d>, LINES: (%d) ", global_wim->buffername, global_wim->cursor_x, global_wim->cursor_y, global_wim->line_count);
     if (in_chord_mode()) {
         for (int i = 0; i < global_wim->chord_write_cursor; ++i) {
             char* to_write_fmt = "%c, ";
@@ -562,9 +563,11 @@ local void draw_status_mode_line(int height) {
     }
 }
 
-local bool load_buffer(const char* buffer, size_t buffer_length) {
+local bool load_buffer(const char* buffer, size_t buffer_length, const char* as="buffer.txt") {
     reset_buffer();
     Line* current_line = new_line();
+
+    cstring_copy(as, global_wim->buffername);
 
     for (unsigned index = 0; index < buffer_length; ++index) {
         switch (buffer[index]) {
@@ -606,7 +609,7 @@ local bool open_buffer(const char* filepath) {
 
     if (ReadFile(file_handle, data_buffer, filesize.QuadPart, 0, 0)) {
         /* okay buffer got read. */
-        load_buffer((char*)data_buffer, filesize.QuadPart);
+        load_buffer((char*)data_buffer, filesize.QuadPart, filepath);
         CloseHandle(file_handle);
         return true;
     } else {
@@ -635,6 +638,26 @@ local void enter_normal_mode(void) {
     global_wim->mode = WIM_MODE_NORMAL;
 }
 
+struct Text_Buffer {
+    char* buffer;
+    size_t size;
+};
+
+Text_Buffer lines_to_flat(Line* lines, size_t line_count) {
+    char* text = (char*)scratch_arena.allocate(0);
+
+    int wrote=0;
+    for (int i = 0; i < line_count; ++i) {
+        for (int j = 0; j < lines[i].used; ++j) {
+            text[wrote++] = lines[i].str[j];
+            scratch_arena.allocate(1);
+        }
+        text[wrote++] = '\n';
+    }
+
+    return {text, wrote};
+}
+
 local void confirm_and_process_command(void) {
     /* TODO */
     if (cstring_equal(global_wim->command_line, "quit")) {
@@ -642,6 +665,21 @@ local void confirm_and_process_command(void) {
     }
     if (cstring_equal(global_wim->command_line, "line")) {
         global_wim->linenum ^= 1;
+    }
+    if (cstring_equal(global_wim->command_line, "write")) {
+        HANDLE file_handle = CreateFile(global_wim->buffername,
+                                        GENERIC_READ|GENERIC_WRITE,
+                                        FILE_SHARE_READ|FILE_SHARE_WRITE,
+                                        NULL,
+                                        CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        NULL);
+        Text_Buffer buffer = lines_to_flat(global_wim->lines, global_wim->line_count);
+        if (WriteFile(file_handle, buffer.buffer, buffer.size, NULL, NULL)) {
+            
+        }
+
+        CloseHandle(file_handle);
     }
     enter_normal_mode();
 }
@@ -781,11 +819,21 @@ local void wim_process_normal_mode(char ascii_input, int key_input) {
             char* chord     = global_wim->chord_state;
             int   chord_len = global_wim->chord_write_cursor;
 
-            if (chord[0] == 'g') {
-                if (chord_len == 2 && chord[1] == 'g') {
-                    seek_to_start_of_buffer();
-                    reset_chord();
-                }
+            switch (chord[0]) {
+                case 'g': /* NAV */
+                {
+                    if (chord_len == 2 && chord[1] == 'g') {
+                        seek_to_start_of_buffer();
+                        reset_chord();
+                    }
+                } break;
+                case 'd': /* DELETE */
+                {
+                    if (chord_len == 2 && chord[1] == 'd') {
+                        delete_line(global_wim->cursor_y);
+                        reset_chord();
+                    }
+                } break;
             }
         }
     } else {
@@ -832,6 +880,7 @@ local void wim_process_normal_mode(char ascii_input, int key_input) {
             } break;
 
                 /* all the chord keys here */
+            case 'd':
             case 'g': {
                 push_chord(ascii_input);
             } break;
@@ -996,7 +1045,7 @@ extern "C" int WINAPI mainCRTStartup(void) {
     scratch_arena = vmem_arena_create(Gigabyte(1));
 
     global_wim    = (wim_state*)main_arena.allocate(sizeof(*global_wim));
-    load_buffer(0, 0);
+    load_buffer(0, 0, "buffer.txt");
 
     char** argument_values = (char**)scratch_arena.allocate(1024 * sizeof(char**));
     int    argument_count  = 0;
